@@ -55,6 +55,7 @@ class TinkerTokenCompleter(TokenCompleter):
     sampling_client: tinker.SamplingClient
     max_tokens: int
     temperature: float = 1.0
+    seed: int | None = None
 
     async def __call__(
         self, model_input: tinker.ModelInput, stop: StopCondition
@@ -68,6 +69,7 @@ class TinkerTokenCompleter(TokenCompleter):
                 stop=stop,
                 max_tokens=self.max_tokens,
                 temperature=self.temperature,
+                seed=self.seed,
             ),
         )
 
@@ -88,10 +90,12 @@ class TinkerMessageCompleter(MessageCompleter):
         renderer: renderers.Renderer,
         max_tokens: int,
         stop_condition: StopCondition | None = None,
+        seed: int | None = None,
     ):
         self.sampling_client = sampling_client
         self.renderer = renderer
         self.max_tokens = max_tokens
+        self.seed = seed
         if stop_condition is None:
             self.stop_condition = self.renderer.get_stop_sequences()
         else:
@@ -109,6 +113,7 @@ class TinkerMessageCompleter(MessageCompleter):
                 temperature=1.0,
                 max_tokens=self.max_tokens,
                 stop=self.stop_condition,
+                seed=self.seed,
             ),
         )
 

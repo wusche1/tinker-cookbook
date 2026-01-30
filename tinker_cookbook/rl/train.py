@@ -280,6 +280,7 @@ class Config:
     model_name: str
     max_tokens: int
     temperature: float = 1.0  # Changing sampling temperature is not generally recommended; does not currently play well with KL penalty
+    seed: int | None = None  # Base seed for reproducible rollouts
     compute_post_kl: bool = False
     evaluator_builders: list[SamplingClientEvaluatorBuilder] = chz.field(default_factory=list)
     lora_rank: int = 32
@@ -413,7 +414,7 @@ async def do_sync_training_with_stream_minibatch(
 
             @scope
             async def trajectory_group_worker_task(
-                builder: EnvGroupBuilder, enable_logging: bool
+                builder: EnvGroupBuilder, enable_logging: bool, seed: int | None = None
             ) -> None:
                 metrics = {}
                 t_start = time.time()
@@ -424,6 +425,7 @@ async def do_sync_training_with_stream_minibatch(
                     temperature=cfg.temperature,
                     do_remove_constant_reward_groups=cfg.remove_constant_reward_groups,
                     enable_logging=enable_logging,
+                    seed=seed,
                 )
                 metrics["time/trajectory_group_worker_loop/total"] = time.time() - t_start
                 if trajectory_group is not None:
@@ -441,8 +443,9 @@ async def do_sync_training_with_stream_minibatch(
             # Sample all trajectories asynchronously. If we have multiple minibatches,
             # then sampling can overlap with training.
             for i, builder in enumerate(env_group_builders_P):
+                rollout_seed = cfg.seed + i_batch * len(env_group_builders_P) + i if cfg.seed is not None else None
                 asyncio.create_task(
-                    trajectory_group_worker_task(builder, enable_logging=i < cfg.num_groups_to_log),
+                    trajectory_group_worker_task(builder, enable_logging=i < cfg.num_groups_to_log, seed=rollout_seed),
                     name=f"trajectory_group_worker_task_{i}",
                 )
 
@@ -501,7 +504,7 @@ async def do_async_training(
     shutdown_event = asyncio.Event()
     # We will have groups_per_batch worker generating rollouts, so cap the
     # queue size to be groups_per_batch.
-    env_group_builders_queue = asyncio.Queue[EnvGroupBuilder | None](
+    env_group_builders_queue = asyncio.Queue[tuple[EnvGroupBuilder, int | None] | None](
         maxsize=cfg.async_config.groups_per_batch
     )
     trajectory_groups_queue = asyncio.Queue[WrappedTrajectoryGroup | None]()
@@ -537,17 +540,19 @@ async def do_async_training(
         i_batch = start_batch
         while not shutdown_event.is_set() and i_batch < end_batch:
             env_group_builders_P = dataset.get_batch(i_batch)
-            for env_group_builder in env_group_builders_P:
-                await env_group_builders_queue.put(env_group_builder)
+            for i, env_group_builder in enumerate(env_group_builders_P):
+                rollout_seed = cfg.seed + i_batch * len(env_group_builders_P) + i if cfg.seed is not None else None
+                await env_group_builders_queue.put((env_group_builder, rollout_seed))
             i_batch += 1
 
     @scope
     async def trajectory_group_worker_loop():
         """Generates trajectories for a single env builder"""
         while not shutdown_event.is_set():
-            env_group_builder = await env_group_builders_queue.get()
-            if env_group_builder is None:
+            item = await env_group_builders_queue.get()
+            if item is None:
                 break
+            env_group_builder, rollout_seed = item
 
             metrics = {}
             t_start = time.time()
@@ -560,6 +565,7 @@ async def do_async_training(
                 max_tokens=cfg.max_tokens,
                 temperature=cfg.temperature,
                 do_remove_constant_reward_groups=cfg.remove_constant_reward_groups,
+                seed=rollout_seed,
             )
             if trajectory_group is None:
                 trajectory_groups_queue.put_nowait(None)
@@ -606,7 +612,7 @@ async def do_async_training(
                 ):
                     logger.info(f"[training_loop] Step {i_batch}: Samples are too stale, skipping")
                     asyncio.create_task(
-                        env_group_builders_queue.put(wrapped_trajectory_group.env_group_builder),
+                        env_group_builders_queue.put((wrapped_trajectory_group.env_group_builder, None)),
                         name="requeue_stale_sample_task",
                     )
                     return False
@@ -721,8 +727,9 @@ async def do_group_rollout_and_filter_constant_reward(
     temperature: float,
     do_remove_constant_reward_groups: bool,
     enable_logging: bool = True,
+    seed: int | None = None,
 ) -> TrajectoryGroup | None:
-    policy = TinkerTokenCompleter(sampling_client, max_tokens=max_tokens, temperature=temperature)
+    policy = TinkerTokenCompleter(sampling_client, max_tokens=max_tokens, temperature=temperature, seed=seed)
 
     with logtree.optional_enable_logging(enable_logging):
         trajectory_group = await do_group_rollout(env_group_builder, policy)
@@ -1104,6 +1111,7 @@ async def do_sync_training(
                         temperature=cfg.temperature,
                         do_remove_constant_reward_groups=False,
                         enable_logging=i < cfg.num_groups_to_log,
+                        seed=cfg.seed + i_batch * len(env_group_builders_P) + i if cfg.seed is not None else None,
                     )
                     for i, builder in enumerate(env_group_builders_P)
                 ),
