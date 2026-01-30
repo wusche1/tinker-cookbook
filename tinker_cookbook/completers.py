@@ -6,6 +6,7 @@ The TokenCompleter operates on tokens. This is the version used by RL algorithms
 Evals and other code should use the appropriate interface.
 """
 
+import random
 from dataclasses import dataclass
 from typing import TypeAlias
 
@@ -16,6 +17,22 @@ from tinker_cookbook import renderers
 # Interfaces
 
 StopCondition: TypeAlias = list[str] | list[int]
+
+
+class SeedGenerator:
+    """Generates deterministic seeds from a base seed.
+
+    Each call to next_seed() returns a unique, deterministic seed.
+    If initialized with None, always returns None (non-deterministic sampling).
+    """
+
+    def __init__(self, base_seed: int | None):
+        self.rng = random.Random(base_seed) if base_seed is not None else None
+
+    def next_seed(self) -> int | None:
+        if self.rng is None:
+            return None
+        return self.rng.randint(0, 2**31 - 1)
 
 
 @dataclass
@@ -55,13 +72,14 @@ class TinkerTokenCompleter(TokenCompleter):
     sampling_client: tinker.SamplingClient
     max_tokens: int
     temperature: float = 1.0
-    seed: int | None = None
+    seed_generator: SeedGenerator | None = None
 
     async def __call__(
         self, model_input: tinker.ModelInput, stop: StopCondition
     ) -> TokensWithLogprobs:
         """Sample an action from the policy given an observation."""
-        # Sample from the model
+        seed = self.seed_generator.next_seed() if self.seed_generator else None
+
         sample_result = await self.sampling_client.sample_async(
             prompt=model_input,
             num_samples=1,
@@ -69,7 +87,7 @@ class TinkerTokenCompleter(TokenCompleter):
                 stop=stop,
                 max_tokens=self.max_tokens,
                 temperature=self.temperature,
-                seed=self.seed,
+                seed=seed,
             ),
         )
 
@@ -90,12 +108,12 @@ class TinkerMessageCompleter(MessageCompleter):
         renderer: renderers.Renderer,
         max_tokens: int,
         stop_condition: StopCondition | None = None,
-        seed: int | None = None,
+        seed_generator: SeedGenerator | None = None,
     ):
         self.sampling_client = sampling_client
         self.renderer = renderer
         self.max_tokens = max_tokens
-        self.seed = seed
+        self.seed_generator = seed_generator
         if stop_condition is None:
             self.stop_condition = self.renderer.get_stop_sequences()
         else:
@@ -105,7 +123,8 @@ class TinkerMessageCompleter(MessageCompleter):
         # Render the conversation for the model
         model_input = self.renderer.build_generation_prompt(messages)
 
-        # Sample from the model
+        seed = self.seed_generator.next_seed() if self.seed_generator else None
+
         response = await self.sampling_client.sample_async(
             model_input,
             num_samples=1,
@@ -113,7 +132,7 @@ class TinkerMessageCompleter(MessageCompleter):
                 temperature=1.0,
                 max_tokens=self.max_tokens,
                 stop=self.stop_condition,
-                seed=self.seed,
+                seed=seed,
             ),
         )
 

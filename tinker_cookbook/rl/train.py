@@ -18,7 +18,7 @@ from tinker.types import LossFnType
 from tqdm import tqdm
 
 from tinker_cookbook import checkpoint_utils
-from tinker_cookbook.completers import TinkerTokenCompleter
+from tinker_cookbook.completers import SeedGenerator, TinkerTokenCompleter
 from tinker_cookbook.display import colorize_example
 from tinker_cookbook.eval.evaluators import SamplingClientEvaluator, SamplingClientEvaluatorBuilder
 from tinker_cookbook.rl.data_processing import (
@@ -385,6 +385,8 @@ async def do_sync_training_with_stream_minibatch(
         training_client, start_batch, cfg.log_path, cfg.save_every, start_batch, cfg.ttl_seconds
     )
 
+    seed_generator = SeedGenerator(cfg.seed)
+
     for i_batch in range(start_batch, end_batch):
         metrics = {
             "progress/batch": i_batch,
@@ -414,7 +416,7 @@ async def do_sync_training_with_stream_minibatch(
 
             @scope
             async def trajectory_group_worker_task(
-                builder: EnvGroupBuilder, enable_logging: bool, seed: int | None = None
+                builder: EnvGroupBuilder, enable_logging: bool
             ) -> None:
                 metrics = {}
                 t_start = time.time()
@@ -425,7 +427,7 @@ async def do_sync_training_with_stream_minibatch(
                     temperature=cfg.temperature,
                     do_remove_constant_reward_groups=cfg.remove_constant_reward_groups,
                     enable_logging=enable_logging,
-                    seed=seed,
+                    seed_generator=seed_generator,
                 )
                 metrics["time/trajectory_group_worker_loop/total"] = time.time() - t_start
                 if trajectory_group is not None:
@@ -443,9 +445,8 @@ async def do_sync_training_with_stream_minibatch(
             # Sample all trajectories asynchronously. If we have multiple minibatches,
             # then sampling can overlap with training.
             for i, builder in enumerate(env_group_builders_P):
-                rollout_seed = cfg.seed + i_batch * len(env_group_builders_P) + i if cfg.seed is not None else None
                 asyncio.create_task(
-                    trajectory_group_worker_task(builder, enable_logging=i < cfg.num_groups_to_log, seed=rollout_seed),
+                    trajectory_group_worker_task(builder, enable_logging=i < cfg.num_groups_to_log),
                     name=f"trajectory_group_worker_task_{i}",
                 )
 
@@ -501,10 +502,13 @@ async def do_async_training(
     """Implements async off-policy training, capped at K steps off policy."""
     assert cfg.async_config is not None
 
+    if cfg.seed is not None:
+        logger.warning("seed is set but async training is non-deterministic; seed will be ignored")
+
     shutdown_event = asyncio.Event()
     # We will have groups_per_batch worker generating rollouts, so cap the
     # queue size to be groups_per_batch.
-    env_group_builders_queue = asyncio.Queue[tuple[EnvGroupBuilder, int | None] | None](
+    env_group_builders_queue = asyncio.Queue[EnvGroupBuilder | None](
         maxsize=cfg.async_config.groups_per_batch
     )
     trajectory_groups_queue = asyncio.Queue[WrappedTrajectoryGroup | None]()
@@ -540,19 +544,17 @@ async def do_async_training(
         i_batch = start_batch
         while not shutdown_event.is_set() and i_batch < end_batch:
             env_group_builders_P = dataset.get_batch(i_batch)
-            for i, env_group_builder in enumerate(env_group_builders_P):
-                rollout_seed = cfg.seed + i_batch * len(env_group_builders_P) + i if cfg.seed is not None else None
-                await env_group_builders_queue.put((env_group_builder, rollout_seed))
+            for env_group_builder in env_group_builders_P:
+                await env_group_builders_queue.put(env_group_builder)
             i_batch += 1
 
     @scope
     async def trajectory_group_worker_loop():
         """Generates trajectories for a single env builder"""
         while not shutdown_event.is_set():
-            item = await env_group_builders_queue.get()
-            if item is None:
+            env_group_builder = await env_group_builders_queue.get()
+            if env_group_builder is None:
                 break
-            env_group_builder, rollout_seed = item
 
             metrics = {}
             t_start = time.time()
@@ -565,7 +567,6 @@ async def do_async_training(
                 max_tokens=cfg.max_tokens,
                 temperature=cfg.temperature,
                 do_remove_constant_reward_groups=cfg.remove_constant_reward_groups,
-                seed=rollout_seed,
             )
             if trajectory_group is None:
                 trajectory_groups_queue.put_nowait(None)
@@ -612,7 +613,7 @@ async def do_async_training(
                 ):
                     logger.info(f"[training_loop] Step {i_batch}: Samples are too stale, skipping")
                     asyncio.create_task(
-                        env_group_builders_queue.put((wrapped_trajectory_group.env_group_builder, None)),
+                        env_group_builders_queue.put(wrapped_trajectory_group.env_group_builder),
                         name="requeue_stale_sample_task",
                     )
                     return False
@@ -727,9 +728,9 @@ async def do_group_rollout_and_filter_constant_reward(
     temperature: float,
     do_remove_constant_reward_groups: bool,
     enable_logging: bool = True,
-    seed: int | None = None,
+    seed_generator: SeedGenerator | None = None,
 ) -> TrajectoryGroup | None:
-    policy = TinkerTokenCompleter(sampling_client, max_tokens=max_tokens, temperature=temperature, seed=seed)
+    policy = TinkerTokenCompleter(sampling_client, max_tokens=max_tokens, temperature=temperature, seed_generator=seed_generator)
 
     with logtree.optional_enable_logging(enable_logging):
         trajectory_group = await do_group_rollout(env_group_builder, policy)
@@ -1074,6 +1075,8 @@ async def do_sync_training(
         training_client, start_batch, cfg.log_path, cfg.save_every, start_batch, cfg.ttl_seconds
     )
 
+    seed_generator = SeedGenerator(cfg.seed)
+
     for i_batch in range(start_batch, end_batch):
         metrics = {
             "progress/batch": i_batch,
@@ -1111,7 +1114,7 @@ async def do_sync_training(
                         temperature=cfg.temperature,
                         do_remove_constant_reward_groups=False,
                         enable_logging=i < cfg.num_groups_to_log,
-                        seed=cfg.seed + i_batch * len(env_group_builders_P) + i if cfg.seed is not None else None,
+                        seed_generator=seed_generator,
                     )
                     for i, builder in enumerate(env_group_builders_P)
                 ),
