@@ -4,6 +4,8 @@ from typing import cast
 import datasets
 import tinker
 from tinker_cookbook import renderers
+from tinker_cookbook.pbt.train import pbt_main
+from tinker_cookbook.pbt.types import HyperparamMutation, PBTConfig
 from tinker_cookbook.recipes.math_rl import arithmetic_env
 from tinker_cookbook.rl import train as rl_train
 from tinker_cookbook.supervised import train as supervised_train
@@ -131,6 +133,51 @@ def test_rl_sync_stream_minibatch():
         ),
     )
     asyncio.run(rl_train.main(cfg))
+
+
+def test_pbt():
+    model_name = "meta-llama/Llama-3.1-8B-Instruct"
+
+    rl_config = rl_train.Config(
+        learning_rate=5e-4,
+        dataset_builder=arithmetic_env.ArithmeticDatasetBuilder(
+            batch_size=16,
+            model_name_for_tokenizer=model_name,
+            renderer_name="role_colon",
+            n_batches=12,
+            include_fewshot=True,
+            group_size=4,
+        ),
+        model_name=model_name,
+        lora_rank=16,
+        max_tokens=5,
+        log_path="/tmp/tinker-smoke-test/pbt",
+        wandb_project="tinker-smoke-test",
+        save_every=4,
+        eval_every=0,
+        num_groups_to_log=0,
+    )
+
+    pbt_config = PBTConfig(
+        rl_config=rl_config,
+        mutations=[
+            HyperparamMutation(
+                param_name="learning_rate",
+                multiplicative_factor=2.0,
+                min_value=1e-6,
+                max_value=1e-2,
+            ),
+        ],
+        metric_name="env/all/reward/total",
+        maximize_metric=True,
+        pbt_every=4,
+        explore_steps=2,
+        population_size=2,
+        include_baseline=True,
+        start_with_exploration=False,
+    )
+
+    asyncio.run(pbt_main(pbt_config))
 
 
 if __name__ == "__main__":

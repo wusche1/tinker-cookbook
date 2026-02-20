@@ -7,7 +7,7 @@ import random
 import tinker
 
 from tinker_cookbook import checkpoint_utils
-from tinker_cookbook.eval.evaluators import SamplingClientEvaluator, SamplingClientEvaluatorBuilder
+from tinker_cookbook.eval.evaluators import SamplingClientEvaluator
 from tinker_cookbook.pbt.mutations import generate_branch_hyperparams
 from tinker_cookbook.pbt.types import (
     BranchResult,
@@ -23,7 +23,6 @@ from tinker_cookbook.rl.train import (
     do_sync_training_with_stream_minibatch,
 )
 from tinker_cookbook.rl.types import RLDataset
-from tinker_cookbook.tokenizer_utils import Tokenizer
 from tinker_cookbook.utils import ml_log
 from tinker_cookbook.utils.file_utils import read_jsonl
 from tinker_cookbook.utils.trace import scope
@@ -76,6 +75,30 @@ def select_winner(results: list[BranchResult], maximize: bool) -> BranchResult:
         return max(results, key=lambda r: r.metric_value)
     else:
         return min(results, key=lambda r: r.metric_value)
+
+
+def _log_branch_metrics_to_trunk(
+    ml_logger: ml_log.Logger,
+    log_path: str,
+    pbt_round: int,
+    results: list[BranchResult],
+    step: int,
+) -> None:
+    round_dir = os.path.join(log_path, f"pbt_round_{pbt_round:03d}")
+    merged: dict[str, float] = {}
+    for result in results:
+        branch_metrics_path = os.path.join(round_dir, f"branch_{result.branch_id}", "metrics.jsonl")
+        if not os.path.exists(branch_metrics_path):
+            continue
+        rows = read_jsonl(branch_metrics_path)
+        if not rows:
+            continue
+        last_row = rows[-1]
+        last_row.pop("step", None)
+        for k, v in last_row.items():
+            merged[f"pbt_round_{pbt_round:03d}/branch_{result.branch_id}/{k}"] = v
+    if merged:
+        ml_logger.log_metrics(merged, step=step)
 
 
 def _save_pbt_state(
@@ -195,7 +218,7 @@ async def run_pbt_exploration(
     maybe_test_dataset: RLDataset | None,
     service_client: tinker.ServiceClient,
     pbt_round: int,
-) -> BranchResult:
+) -> list[BranchResult]:
     rng = random.Random(pbt_round)
 
     num_mutated = pbt_cfg.population_size - (1 if pbt_cfg.include_baseline else 0)
@@ -223,15 +246,7 @@ async def run_pbt_exploration(
         for bid, hp in branch_hyperparams
     ]
 
-    results = await asyncio.gather(*tasks)
-
-    winner = select_winner(list(results), pbt_cfg.maximize_metric)
-    logger.info(
-        f"PBT round {pbt_round}: winner is branch {winner.branch_id} "
-        f"with {pbt_cfg.metric_name}={winner.metric_value:.4f}, "
-        f"hyperparams={winner.hyperparams}"
-    )
-    return winner
+    return list(await asyncio.gather(*tasks))
 
 
 @scope
@@ -303,7 +318,7 @@ async def pbt_main(pbt_cfg: PBTConfig) -> None:
             )
 
             explore_end = min(step + pbt_cfg.explore_steps, num_batches)
-            winner = await run_pbt_exploration(
+            results = await run_pbt_exploration(
                 pbt_cfg=pbt_cfg,
                 state_path=trunk_paths["state_path"],
                 current_hyperparams=current_hyperparams,
@@ -314,6 +329,16 @@ async def pbt_main(pbt_cfg: PBTConfig) -> None:
                 maybe_test_dataset=maybe_test_dataset,
                 service_client=service_client,
                 pbt_round=pbt_round,
+            )
+
+            # Log branch metrics to trunk (appears in wandb under prefixed keys)
+            _log_branch_metrics_to_trunk(ml_logger, cfg.log_path, pbt_round, results, step=explore_end)
+
+            winner = select_winner(results, pbt_cfg.maximize_metric)
+            logger.info(
+                f"PBT round {pbt_round}: winner is branch {winner.branch_id} "
+                f"with {pbt_cfg.metric_name}={winner.metric_value:.4f}, "
+                f"hyperparams={winner.hyperparams}"
             )
 
             # Adopt winner
