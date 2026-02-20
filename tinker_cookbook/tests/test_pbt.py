@@ -47,8 +47,8 @@ class TestApplyMutation:
             additive_delta=1.0,
             min_value=0.01,
         )
-        rng = random.Random(0)
         # Force subtract by trying seeds until we get the negative branch
+        value = 0.0
         for seed in range(100):
             rng = random.Random(seed)
             value = apply_mutation(0.05, mutation, rng)
@@ -62,7 +62,7 @@ class TestApplyMutation:
             additive_delta=1.0,
             max_value=0.5,
         )
-        rng = random.Random(0)
+        value = 0.0
         for seed in range(100):
             rng = random.Random(seed)
             value = apply_mutation(0.05, mutation, rng)
@@ -204,4 +204,5 @@ class TestValidation:
         m = HyperparamMutation(
             param_name="lr", multiplicative_factor=2.0, min_value=0.1, max_value=1.0
         )
+        assert m.min_value is not None and m.max_value is not None
         assert m.min_value < m.max_value

@@ -64,9 +64,7 @@ def validate_pbt_config(pbt_cfg: PBTConfig) -> None:
                 f"got {sum(strategies)}"
             )
         if not hasattr(cfg, mutation.param_name):
-            raise ValueError(
-                f"'{mutation.param_name}' is not a field on rl_train.Config"
-            )
+            raise ValueError(f"'{mutation.param_name}' is not a field on rl_train.Config")
         if mutation.min_value is not None and mutation.max_value is not None:
             if mutation.min_value >= mutation.max_value:
                 raise ValueError(

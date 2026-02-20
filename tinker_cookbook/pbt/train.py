@@ -150,8 +150,8 @@ async def run_branch(
     )
     branch_cfg = make_branch_config(cfg, branch_log_path, hyperparams)
 
-    training_client = (
-        await service_client.create_training_client_from_state_with_optimizer_async(state_path)
+    training_client = await service_client.create_training_client_from_state_with_optimizer_async(
+        state_path
     )
     tokenizer = training_client.get_tokenizer()
     branch_logger = ml_log.setup_logging(
@@ -194,8 +194,7 @@ async def run_branch(
     branch_logger.close()
 
     logger.info(
-        f"PBT round {pbt_round}, branch {branch_id}: "
-        f"{pbt_cfg.metric_name}={metric_value:.4f}"
+        f"PBT round {pbt_round}, branch {branch_id}: {pbt_cfg.metric_name}={metric_value:.4f}"
     )
 
     return BranchResult(
@@ -279,9 +278,7 @@ async def pbt_main(pbt_cfg: PBTConfig) -> None:
     else:
         step = 0
         pbt_round = 0
-        current_hyperparams = {
-            m.param_name: getattr(cfg, m.param_name) for m in pbt_cfg.mutations
-        }
+        current_hyperparams = {m.param_name: getattr(cfg, m.param_name) for m in pbt_cfg.mutations}
         history: list[dict] = []
 
         # Create initial training client
@@ -301,9 +298,8 @@ async def pbt_main(pbt_cfg: PBTConfig) -> None:
     logger.info(f"PBT training: {num_batches} total batches, pbt_every={pbt_cfg.pbt_every}")
 
     while step < num_batches:
-        should_explore = (
-            (pbt_cfg.start_with_exploration and step == 0)
-            or (step > 0 and step % pbt_cfg.pbt_every == 0)
+        should_explore = (pbt_cfg.start_with_exploration and step == 0) or (
+            step > 0 and step % pbt_cfg.pbt_every == 0
         )
 
         if should_explore:
@@ -332,7 +328,9 @@ async def pbt_main(pbt_cfg: PBTConfig) -> None:
             )
 
             # Log branch metrics to trunk (appears in wandb under prefixed keys)
-            _log_branch_metrics_to_trunk(ml_logger, cfg.log_path, pbt_round, results, step=explore_end)
+            _log_branch_metrics_to_trunk(
+                ml_logger, cfg.log_path, pbt_round, results, step=explore_end
+            )
 
             winner = select_winner(results, pbt_cfg.maximize_metric)
             logger.info(
@@ -360,19 +358,25 @@ async def pbt_main(pbt_cfg: PBTConfig) -> None:
                 pbt_metrics[f"pbt/{k}"] = v
             ml_logger.log_metrics(pbt_metrics, step=explore_end)
 
-            history.append({
-                "round": pbt_round,
-                "step": step,
-                "winner_branch": str(winner.branch_id),
-                "hyperparams": current_hyperparams,
-                "metric": winner.metric_value,
-            })
+            history.append(
+                {
+                    "round": pbt_round,
+                    "step": step,
+                    "winner_branch": str(winner.branch_id),
+                    "hyperparams": current_hyperparams,
+                    "metric": winner.metric_value,
+                }
+            )
             step = explore_end
             pbt_round += 1
 
             _save_pbt_state(
-                cfg.log_path, step, pbt_round, current_hyperparams,
-                winner.state_path, history,
+                cfg.log_path,
+                step,
+                pbt_round,
+                current_hyperparams,
+                winner.state_path,
+                history,
             )
         else:
             # Normal training segment
@@ -415,8 +419,12 @@ async def pbt_main(pbt_cfg: PBTConfig) -> None:
     )
 
     _save_pbt_state(
-        cfg.log_path, num_batches, pbt_round, current_hyperparams,
-        "final", history,
+        cfg.log_path,
+        num_batches,
+        pbt_round,
+        current_hyperparams,
+        "final",
+        history,
     )
 
     ml_logger.close()

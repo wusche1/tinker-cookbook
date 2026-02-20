@@ -3,9 +3,7 @@ import random
 from tinker_cookbook.pbt.types import HyperparamMutation
 
 
-def apply_mutation(
-    current_value: float, mutation: HyperparamMutation, rng: random.Random
-) -> float:
+def apply_mutation(current_value: float, mutation: HyperparamMutation, rng: random.Random) -> float:
     if mutation.allowed_values is not None:
         value = rng.choice(mutation.allowed_values)
     elif mutation.additive_delta is not None:
